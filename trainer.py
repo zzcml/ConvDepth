@@ -194,6 +194,14 @@ class Trainer:
 
         self.AdaptiveImageLossFunction=AdaptiveImageLossFunction(image_size=(self.opt.width,self.opt.height,3),float_dtype=np.float32,device=0)
 
+        # Initialize Lotus-2 teacher model for distillation
+        self.teacher_model = None
+        if self.opt.use_lotus2_distill:
+            from networks.lotus2_teacher import create_teacher_model
+            assert self.opt.lotus2_weights_path is not None, \
+                "Please provide --lotus2_weights_path when using --use_lotus2_distill"
+            self._init_lotus2_teacher()
+
     def set_train(self):
         """Convert all models to training mode
         """
@@ -205,6 +213,31 @@ class Trainer:
         """
         for m in self.models.values():
             m.eval()
+        # Keep teacher model in eval mode
+        if self.teacher_model is not None:
+            self.teacher_model.eval()
+
+    def _init_lotus2_teacher(self):
+        """Initialize Lotus-2 teacher model for knowledge distillation
+        """
+        print("Loading Lotus-2 teacher model from:\n  ", self.opt.lotus2_weights_path)
+        
+        # Import teacher model wrapper
+        from networks.lotus2_teacher import create_teacher_model
+        from networks.ConvNext_encorder_v2 import convnextv2_base
+        from networks.Convnext_decoder import ConvDecoder
+        
+        # Create teacher model using factory function
+        self.teacher_model = create_teacher_model(
+            self.opt, 
+            encoder_class=convnextv2_base,
+            decoder_class=ConvDecoder
+        )
+        
+        if self.teacher_model is not None:
+            print("Lotus-2 teacher model loaded successfully")
+        else:
+            print("Warning: Teacher model initialization failed")
 
     def train(self):
         """Run the entire training pipeline
@@ -277,6 +310,14 @@ class Trainer:
             features = self.models["encoder"](inputs["color_aug", 0, 0])
            # print(np.array(features).shape)
             outputs = self.models["depth"](features)
+
+        # Generate teacher predictions for distillation if enabled
+        if self.teacher_model is not None:
+            with torch.no_grad():
+                teacher_outputs = self.teacher_model(inputs["color_aug", 0, 0])
+                # Store teacher's disparity predictions for each scale
+                for scale in self.opt.scales:
+                    outputs[("teacher_disp", scale)] = teacher_outputs[("disp", scale)].detach()
 
         if self.opt.predictive_mask:
             outputs["predictive_mask"] = self.models["predictive_mask"](features)
@@ -586,6 +627,29 @@ class Trainer:
             smooth_loss = get_smooth_loss(norm_disp, color)
 
             loss = loss+self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
+            
+            # Add distillation loss if teacher model is available
+            if self.teacher_model is not None and ("teacher_disp", scale) in outputs:
+                teacher_disp = outputs[("teacher_disp", scale)]
+                # Apply temperature scaling for soft targets
+                T = self.opt.distill_temperature
+                
+                # Student and teacher disparity predictions
+                student_disp = outputs[("disp", scale)]
+                
+                # Compute KL divergence based distillation loss
+                # Using L1 distance with temperature scaling as a simplified approach
+                # for disparity distillation (more stable than KL for depth)
+                distill_loss = F.l1_loss(
+                    student_disp / T, 
+                    teacher_disp / T, 
+                    reduction='mean'
+                ) * (T ** 2)  # Scale by T^2 to maintain gradient magnitude
+                
+                # Weight the distillation loss
+                loss = loss + self.opt.distill_loss_weight * distill_loss
+                losses[f"distill_loss/{scale}"] = distill_loss.item()
+
             total_loss =total_loss + loss
 
             losses["loss/{}".format(scale)] = loss
@@ -657,6 +721,12 @@ class Trainer:
                 writer.add_image(
                     "disp_{}/{}".format(s, j),
                     normalize_image(outputs[("disp", s)][j]), self.step)
+
+                # Log teacher disparity if available (for distillation monitoring)
+                if self.teacher_model is not None and ("teacher_disp", s) in outputs:
+                    writer.add_image(
+                        "teacher_disp_{}/{}".format(s, j),
+                        normalize_image(outputs[("teacher_disp", s)][j]), self.step)
 
                 if self.opt.predictive_mask:
                     for f_idx, frame_id in enumerate(self.opt.frame_ids[1:]):

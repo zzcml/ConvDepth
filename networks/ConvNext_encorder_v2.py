@@ -8,8 +8,22 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import trunc_normal_, DropPath
-from layers import LayerNorm, GRN
+
+# Import DropPath if available, otherwise use Identity as fallback
+try:
+    from timm.models.layers import trunc_normal_, DropPath
+except ImportError:
+    # Fallback when timm is not installed
+    trunc_normal_ = None
+    class DropPath(nn.Module):
+        """Drop paths (Stochastic Depth) per sample - identity fallback"""
+        def __init__(self, drop_prob=0.):
+            super().__init__()
+            self.drop_prob = drop_prob
+        def forward(self, x):
+            return x  # Identity during inference
+        
+# LayerNorm and GRN imports removed - using BatchNorm for hardware friendliness
 
 
 class Block(nn.Module):
@@ -22,26 +36,26 @@ class Block(nn.Module):
 
     def __init__(self, dim, drop_path=0.):
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
-        self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
-        self.act = nn.GELU()
-        self.grn = GRN(4 * dim)
-        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv, [N,C,H,W]->[N,C,H,W]
+        # Replace LayerNorm+permute with Conv2d-based normalization for hardware friendliness
+        self.norm = nn.BatchNorm2d(dim, eps=1e-6)
+        self.pwconv1 = nn.Conv2d(dim, 4 * dim, kernel_size=1)  # pointwise conv: [N,C,H,W]->[N,4C,H,W]
+        self.act = nn.ReLU(inplace=True)  # ReLU: hardware friendly activation f(x)=max(0,x)
+        # GRN removed for hardware efficiency - avoid global reduction operations
+        self.pwconv2 = nn.Conv2d(4 * dim, dim, kernel_size=1)  # pointwise conv: [N,4C,H,W]->[N,C,H,W]
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
+        # Input: [N, C, H, W] = [1, 3, 1024, 1024]
         input = x
-        x = self.dwconv(x)
-        x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
-        x = self.norm(x)
-        x = self.pwconv1(x)
-        x = self.act(x)
-        x = self.grn(x)
-        x = self.pwconv2(x)
-        x = x.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
+        x = self.dwconv(x)  # [1, C, H, W], depthwise conv with kernel 7, padding 3
+        x = self.norm(x)  # [1, C, H, W], BatchNorm (can be fused to conv for deployment)
+        x = self.pwconv1(x)  # [1, 4*C, H, W], pointwise conv: C -> 4*C
+        x = self.act(x)  # [1, 4*C, H, W], ReLU activation
+        # GRN removed - skip global response normalization
+        x = self.pwconv2(x)  # [1, C, H, W], pointwise conv: 4*C -> C
 
-        x = input + self.drop_path(x)
+        x = input + self.drop_path(x)  # [1, C, H, W], residual connection
         return x
 
 
@@ -67,12 +81,12 @@ class ConvNeXtV2(nn.Module):
         self.downsample_layers = nn.ModuleList()  # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
             nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
-            LayerNorm(dims[0], eps=1e-6, data_format="channels_first")
+            nn.BatchNorm2d(dims[0], eps=1e-6)
         )
         self.downsample_layers.append(stem)
         for i in range(3):
             downsample_layer = nn.Sequential(
-                LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
+                nn.BatchNorm2d(dims[i], eps=1e-6),
                 nn.Conv2d(dims[i], dims[i + 1], kernel_size=2, stride=2),
             )
             self.downsample_layers.append(downsample_layer)
@@ -116,19 +130,23 @@ class ConvNeXtV2(nn.Module):
         return x
 
     def forward(self, x):
-        # for i in range(4):
-        #     x = self.downsample_layers[i](x)
-        #     x = self.stages[i](x)
-        #     # print(x.shape)
-        #     self.features.append(x)
+        # Input: [N, C, H, W] = [1, 3, 1024, 1024]
+        # Stage 0: stem downsampling (kernel=4, stride=4)
         self.features = []
-        x = self.downsample_layers[0](x)
-        x = self.stages[0](x)
-        self.features.append(x)
-        self.features.append(self.layer(1,self.features[-1]))
-        self.features.append(self.layer(2, self.features[-1]))
-        self.features.append(self.layer(3, self.features[-1]))
-        return self.features # global average pooling, (N, C, H, W) -> (N, C)
+        x = self.downsample_layers[0](x)  # [1, dims[0], 256, 256], e.g., [1, 128, 256, 256] for base model
+        x = self.stages[0](x)  # [1, dims[0], 256, 256], after Block processing
+        self.features.append(x)  # features[0]: [1, 128, 256, 256]
+        
+        # Stage 1: downsampling (stride=2)
+        self.features.append(self.layer(1, self.features[-1]))  # [1, dims[1], 128, 128], e.g., [1, 256, 128, 128]
+        
+        # Stage 2: downsampling (stride=2)
+        self.features.append(self.layer(2, self.features[-1]))  # [1, dims[2], 64, 64], e.g., [1, 512, 64, 64]
+        
+        # Stage 3: downsampling (stride=2)
+        self.features.append(self.layer(3, self.features[-1]))  # [1, dims[3], 32, 32], e.g., [1, 1024, 32, 32]
+        
+        return self.features  # List of 4 feature maps at different scales
 
 
 

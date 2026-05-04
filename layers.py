@@ -103,13 +103,14 @@ def rot_from_axisangle(vec):
 
 
 class ConvBlock(nn.Module):
-    """Layer to perform a convolution followed by ELU
+    """Layer to perform a convolution followed by ReLU
     """
     def __init__(self, in_channels, out_channels):
         super(ConvBlock, self).__init__()
 
         self.conv = Conv3x3(in_channels, out_channels)
-        self.nonlin = nn.ELU(inplace=True)
+        # ReLU activation: f(x) = max(0, x) - hardware friendly alternative to ELU
+        self.nonlin = nn.ReLU(inplace=True)
 
     def forward(self, x):
         out = self.conv(x)
@@ -117,13 +118,14 @@ class ConvBlock(nn.Module):
         return out
 
 class ODBlock(nn.Module):
-    """Layer to perform a convolution followed by ELU
+    """Layer to perform a convolution followed by ReLU
     """
     def __init__(self, in_channels, out_channels):
         super(ODBlock, self).__init__()
 
         self.conv = ODConv2d(in_channels, out_channels,3,padding=1)
-        self.nonlin = nn.ELU(inplace=True)
+        # ReLU activation: f(x) = max(0, x) - hardware friendly alternative to ELU
+        self.nonlin = nn.ReLU(inplace=True)
 
     def forward(self, x):
         out = self.conv(x)
