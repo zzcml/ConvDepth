@@ -1,3 +1,27 @@
-(networks/ConvNext_encorder_v2.py and networks/Convnext_decoder.py are both Python source files, so no files in the change list match the criteria for being added to .gitignore)
+```gitignore
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-# No changes needed - only Python source files were modified
+# Dependencies
+venv/
+.venv/
+.env
+.env.local
+*.env.*
+
+# Logs and temporary files
+*.log
+*.tmp
+
+# Editors
+.vscode/
+.idea/
+
+# Build artifacts
+dist/
+build/
+target/
+```

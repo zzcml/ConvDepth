@@ -8,8 +8,26 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import DropPath
-from timm.models.registry import register_model
+
+# Import DropPath if available, otherwise use Identity as fallback
+try:
+    from timm.models.layers import DropPath
+except ImportError:
+    class DropPath(nn.Module):
+        """Drop paths (Stochastic Depth) per sample - identity fallback"""
+        def __init__(self, drop_prob=0.):
+            super().__init__()
+            self.drop_prob = drop_prob
+        def forward(self, x):
+            return x  # Identity during inference
+
+try:
+    from timm.models.registry import register_model
+except ImportError:
+    # Fallback decorator that does nothing when timm is not installed
+    def register_model(fn):
+        return fn
+    
 import torch.nn.modules
 
 

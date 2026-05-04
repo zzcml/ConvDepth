@@ -26,6 +26,8 @@ class Enh(nn.Module):
         self.conv1x1 = nn.Conv2d(out_c, out_c, 1)
         self.resblock=Resblock(out_c,out_c)
         self.convb = ConvBlock(in_c, out_c)
+        # Replace F.interpolate with transposed convolution for hardware-friendly upsampling
+        self.upsample = nn.ConvTranspose2d(out_c, out_c, kernel_size=2, stride=2)
 
     def forward(self,input):
         # Input: tuple (x, y), e.g., x=[1, 256, 64, 64], y=[1, 256, 32, 32]
@@ -43,7 +45,7 @@ class Enh(nn.Module):
         z=[z] + [Add]  # List of two tensors: [refined, residual]
         z=torch.cat(z,1)  # [N, 2*C, H, W], concatenate along channel dimension
         z = self.convb(z)  # [N, out_c, H, W], reduce channels back
-        z=upsample(z)  # [N, out_c, 2H, 2W], upsample by factor of 2
+        z=self.upsample(z)  # [N, out_c, 2H, 2W], transposed conv upsample by factor of 2
 
         return z
 
@@ -56,12 +58,17 @@ class ConvDecoder(nn.Module):
 
         self.num_output_channels = num_output_channels
         self.use_skips = use_skips
-        self.upsample_mode = 'nearest'
         self.scales = scales
 
         self.num_ch_enc = num_ch_enc
         self.num_ch_enc_0=np.array([256,256,512,1024])
         self.num_ch_dec = np.array([128, 128,256, 512])
+
+        # Hardware-friendly upsampling using transposed convolutions
+        self.upsample32 = nn.ConvTranspose2d(self.num_ch_dec[3], self.num_ch_dec[3], kernel_size=2, stride=2)
+        self.upsample21 = nn.ConvTranspose2d(self.num_ch_dec[2], self.num_ch_dec[2], kernel_size=2, stride=2)
+        self.upsample10 = nn.ConvTranspose2d(self.num_ch_dec[1], self.num_ch_dec[1], kernel_size=2, stride=2)
+        self.upsample_f0 = nn.ConvTranspose2d(self.num_ch_enc[0], self.num_ch_enc[0], kernel_size=2, stride=2)
 
         # decoder
         self.convs = OrderedDict()
@@ -97,25 +104,25 @@ class ConvDecoder(nn.Module):
         f1 = self.convs[("conv1x1", 1,0)](input_features[1])  # [1, 256, 128, 128] -> [1, 256, 128, 128]
         f0 = self.convs[("conv1x1", 0,0)](input_features[0])  # [1, 128, 256, 256] -> [1, 128, 256, 256]
 
-        # Decoder stage 3 (coarsest): process f3 and upsample
+        # Decoder stage 3 (coarsest): process f3 and upsample with transposed conv
         x=self.convs[("conv3x3", 3,1)](f3)  # [1, 1024, 32, 32] -> [1, 512, 32, 32]
-        x = upsample(x)  # [1, 512, 64, 64], upsample by 2x
+        x = self.upsample32(x)  # [1, 512, 64, 64], transposed conv upsample by 2x
         x=self.dec[3]((x,f2))  # Enh module: ([1, 512, 64, 64], [1, 512, 64, 64]) -> [1, 512, 128, 128]
         self.outputs[("disp", 3)]= self.convs[("dispconv", 3)](x)  # [1, 1, 128, 128], disparity output at scale 3
 
-        # Decoder stage 2: process and upsample
+        # Decoder stage 2: process and upsample with transposed conv
         x=self.convs[("conv3x3", 2,1)](x)  # [1, 512, 128, 128] -> [1, 256, 128, 128]
         x=self.dec[2]((x,f1))  # Enh module: ([1, 256, 128, 128], [1, 256, 128, 128]) -> [1, 256, 256, 256]
         self.outputs[("disp", 2)]= self.convs[("dispconv", 2)](x)  # [1, 1, 256, 256], disparity output at scale 2
 
-        # Decoder stage 1: process and upsample
+        # Decoder stage 1: process and upsample with transposed conv
         x=self.convs[("conv3x3", 1,1)](x)  # [1, 256, 256, 256] -> [1, 128, 256, 256]
         x=self.dec[1]((x,f0))  # Enh module: ([1, 128, 256, 256], [1, 128, 256, 256]) -> [1, 128, 512, 512]
         self.outputs[("disp", 1)] = self.convs[("dispconv", 1)](x)  # [1, 1, 512, 512], disparity output at scale 1
 
-        # Decoder stage 0 (finest): process final level
+        # Decoder stage 0 (finest): process final level with transposed conv
         x=self.convs[("conv3x3", 0,1)](x)  # [1, 128, 512, 512] -> [1, 128, 512, 512]
-        f0_up=upsample(f0)  # [1, 128, 512, 512], upsample skip connection
+        f0_up=self.upsample_f0(f0)  # [1, 128, 512, 512], transposed conv upsample skip connection
         x=self.dec[0]((x,f0_up))  # Enh module: ([1, 128, 512, 512], [1, 128, 512, 512]) -> [1, 128, 1024, 1024]
         self.outputs[("disp", 0)]= self.convs[("dispconv", 0)](x)  # [1, 1, 1024, 1024], final disparity output
 

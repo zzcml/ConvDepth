@@ -8,8 +8,22 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import trunc_normal_, DropPath
-from layers import LayerNorm, GRN
+
+# Import DropPath if available, otherwise use Identity as fallback
+try:
+    from timm.models.layers import trunc_normal_, DropPath
+except ImportError:
+    # Fallback when timm is not installed
+    trunc_normal_ = None
+    class DropPath(nn.Module):
+        """Drop paths (Stochastic Depth) per sample - identity fallback"""
+        def __init__(self, drop_prob=0.):
+            super().__init__()
+            self.drop_prob = drop_prob
+        def forward(self, x):
+            return x  # Identity during inference
+        
+# LayerNorm and GRN imports removed - using BatchNorm for hardware friendliness
 
 
 class Block(nn.Module):
@@ -22,27 +36,26 @@ class Block(nn.Module):
 
     def __init__(self, dim, drop_path=0.):
         super().__init__()
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv
-        self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, 4 * dim)  # pointwise/1x1 convs, implemented with linear layers
-        self.act = nn.GELU(approximate='tanh')  # GELU with tanh approximation for hardware efficiency
-        self.grn = GRN(4 * dim)
-        self.pwconv2 = nn.Linear(4 * dim, dim)
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)  # depthwise conv, [N,C,H,W]->[N,C,H,W]
+        # Replace LayerNorm+permute with Conv2d-based normalization for hardware friendliness
+        self.norm = nn.BatchNorm2d(dim, eps=1e-6)
+        self.pwconv1 = nn.Conv2d(dim, 4 * dim, kernel_size=1)  # pointwise conv: [N,C,H,W]->[N,4C,H,W]
+        self.act = nn.ReLU(inplace=True)  # ReLU: hardware friendly activation f(x)=max(0,x)
+        # GRN removed for hardware efficiency - avoid global reduction operations
+        self.pwconv2 = nn.Conv2d(4 * dim, dim, kernel_size=1)  # pointwise conv: [N,4C,H,W]->[N,C,H,W]
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
         # Input: [N, C, H, W] = [1, 3, 1024, 1024]
         input = x
-        x = self.dwconv(x)  # [1, C, 1024, 1024], depthwise conv with kernel 7, padding 3
-        x = x.permute(0, 2, 3, 1)  # [1, 1024, 1024, C], (N, C, H, W) -> (N, H, W, C)
-        x = self.norm(x)  # [1, 1024, 1024, C], LayerNorm
-        x = self.pwconv1(x)  # [1, 1024, 1024, 4*C], pointwise linear: C -> 4*C
-        x = self.act(x)  # [1, 1024, 1024, 4*C], GELU activation
-        x = self.grn(x)  # [1, 1024, 1024, 4*C], Global Response Normalization
-        x = self.pwconv2(x)  # [1, 1024, 1024, C], pointwise linear: 4*C -> C
-        x = x.permute(0, 3, 1, 2)  # [1, C, 1024, 1024], (N, H, W, C) -> (N, C, H, W)
+        x = self.dwconv(x)  # [1, C, H, W], depthwise conv with kernel 7, padding 3
+        x = self.norm(x)  # [1, C, H, W], BatchNorm (can be fused to conv for deployment)
+        x = self.pwconv1(x)  # [1, 4*C, H, W], pointwise conv: C -> 4*C
+        x = self.act(x)  # [1, 4*C, H, W], ReLU activation
+        # GRN removed - skip global response normalization
+        x = self.pwconv2(x)  # [1, C, H, W], pointwise conv: 4*C -> C
 
-        x = input + self.drop_path(x)  # [1, C, 1024, 1024], residual connection
+        x = input + self.drop_path(x)  # [1, C, H, W], residual connection
         return x
 
 
@@ -68,12 +81,12 @@ class ConvNeXtV2(nn.Module):
         self.downsample_layers = nn.ModuleList()  # stem and 3 intermediate downsampling conv layers
         stem = nn.Sequential(
             nn.Conv2d(in_chans, dims[0], kernel_size=4, stride=4),
-            LayerNorm(dims[0], eps=1e-6, data_format="channels_first")
+            nn.BatchNorm2d(dims[0], eps=1e-6)
         )
         self.downsample_layers.append(stem)
         for i in range(3):
             downsample_layer = nn.Sequential(
-                LayerNorm(dims[i], eps=1e-6, data_format="channels_first"),
+                nn.BatchNorm2d(dims[i], eps=1e-6),
                 nn.Conv2d(dims[i], dims[i + 1], kernel_size=2, stride=2),
             )
             self.downsample_layers.append(downsample_layer)
