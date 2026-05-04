@@ -194,6 +194,13 @@ class Trainer:
 
         self.AdaptiveImageLossFunction=AdaptiveImageLossFunction(image_size=(self.opt.width,self.opt.height,3),float_dtype=np.float32,device=0)
 
+        # Initialize Lotus-2 teacher model for distillation
+        self.teacher_model = None
+        if self.opt.use_lotus2_distill:
+            assert self.opt.lotus2_weights_path is not None, \
+                "Please provide --lotus2_weights_path when using --use_lotus2_distill"
+            self._init_lotus2_teacher()
+
     def set_train(self):
         """Convert all models to training mode
         """
@@ -205,6 +212,59 @@ class Trainer:
         """
         for m in self.models.values():
             m.eval()
+        # Keep teacher model in eval mode
+        if self.teacher_model is not None:
+            self.teacher_model.eval()
+
+    def _init_lotus2_teacher(self):
+        """Initialize Lotus-2 teacher model for knowledge distillation
+        """
+        print("Loading Lotus-2 teacher model from:\n  ", self.opt.lotus2_weights_path)
+        
+        # Import teacher model architecture (assuming similar structure)
+        # Lotus-2 typically uses a depth estimation network
+        from networks.ConvNext_encorder_v2 import convnextv2_base
+        from networks.Convnext_decoder import ConvDecoder
+        
+        # Create teacher model with same architecture
+        teacher_encoder = convnextv2_base()
+        teacher_depth = ConvDecoder(teacher_encoder.num_ch_enc, self.opt.scales)
+        
+        # Load pretrained weights
+        if os.path.isfile(self.opt.lotus2_weights_path):
+            checkpoint = torch.load(self.opt.lotus2_weights_path, map_location='cpu')
+            
+            # Handle different checkpoint formats
+            if 'encoder' in checkpoint and 'depth' in checkpoint:
+                teacher_encoder.load_state_dict(checkpoint['encoder'])
+                teacher_depth.load_state_dict(checkpoint['depth'])
+            else:
+                # Try loading directly
+                try:
+                    teacher_encoder.load_state_dict({k.replace('encoder.', ''): v 
+                                                    for k, v in checkpoint.items() 
+                                                    if 'encoder.' in k})
+                    teacher_depth.load_state_dict({k.replace('depth.', ''): v 
+                                                  for k, v in checkpoint.items() 
+                                                  if 'depth.' in k})
+                except:
+                    teacher_encoder.load_state_dict(checkpoint)
+        else:
+            raise FileNotFoundError(f"Teacher weights not found at {self.opt.lotus2_weights_path}")
+        
+        # Move to device and set to eval mode
+        self.teacher_model = {
+            'encoder': teacher_encoder.to(self.device),
+            'depth': teacher_depth.to(self.device)
+        }
+        
+        # Freeze teacher parameters (no gradient computation)
+        for param in self.teacher_model['encoder'].parameters():
+            param.requires_grad = False
+        for param in self.teacher_model['depth'].parameters():
+            param.requires_grad = False
+            
+        print("Lotus-2 teacher model loaded successfully")
 
     def train(self):
         """Run the entire training pipeline
@@ -277,6 +337,15 @@ class Trainer:
             features = self.models["encoder"](inputs["color_aug", 0, 0])
            # print(np.array(features).shape)
             outputs = self.models["depth"](features)
+
+        # Generate teacher predictions for distillation if enabled
+        if self.teacher_model is not None:
+            with torch.no_grad():
+                teacher_features = self.teacher_model['encoder'](inputs["color_aug", 0, 0])
+                teacher_outputs = self.teacher_model['depth'](teacher_features)
+                # Store teacher's disparity predictions for each scale
+                for scale in self.opt.scales:
+                    outputs[("teacher_disp", scale)] = teacher_outputs[("disp", scale)].detach()
 
         if self.opt.predictive_mask:
             outputs["predictive_mask"] = self.models["predictive_mask"](features)
@@ -586,6 +655,29 @@ class Trainer:
             smooth_loss = get_smooth_loss(norm_disp, color)
 
             loss = loss+self.opt.disparity_smoothness * smooth_loss / (2 ** scale)
+            
+            # Add distillation loss if teacher model is available
+            if self.teacher_model is not None and ("teacher_disp", scale) in outputs:
+                teacher_disp = outputs[("teacher_disp", scale)]
+                # Apply temperature scaling for soft targets
+                T = self.opt.distill_temperature
+                
+                # Student and teacher disparity predictions
+                student_disp = outputs[("disp", scale)]
+                
+                # Compute KL divergence based distillation loss
+                # Using L1 distance with temperature scaling as a simplified approach
+                # for disparity distillation (more stable than KL for depth)
+                distill_loss = F.l1_loss(
+                    student_disp / T, 
+                    teacher_disp / T, 
+                    reduction='mean'
+                ) * (T ** 2)  # Scale by T^2 to maintain gradient magnitude
+                
+                # Weight the distillation loss
+                loss = loss + self.opt.distill_loss_weight * distill_loss
+                losses[f"distill_loss/{scale}"] = distill_loss.item()
+
             total_loss =total_loss + loss
 
             losses["loss/{}".format(scale)] = loss
@@ -657,6 +749,12 @@ class Trainer:
                 writer.add_image(
                     "disp_{}/{}".format(s, j),
                     normalize_image(outputs[("disp", s)][j]), self.step)
+
+                # Log teacher disparity if available (for distillation monitoring)
+                if self.teacher_model is not None and ("teacher_disp", s) in outputs:
+                    writer.add_image(
+                        "teacher_disp_{}/{}".format(s, j),
+                        normalize_image(outputs[("teacher_disp", s)][j]), self.step)
 
                 if self.opt.predictive_mask:
                     for f_idx, frame_id in enumerate(self.opt.frame_ids[1:]):

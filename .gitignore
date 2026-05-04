@@ -1,5 +1,5 @@
 ```gitignore
-# Python cache files
+# Python cache
 __pycache__/
 *.pyc
 *.pyo
@@ -12,13 +12,20 @@ venv/
 .env.local
 *.env.*
 
-# Logs and temporary files
+# Logs
 *.log
-*.tmp
 
-# Editors
+# Editor/IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*.tmp
+
+# Coverage
+coverage/
+htmlcov/
+.coverage
 
 # Build artifacts
 dist/

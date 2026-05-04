@@ -208,6 +208,22 @@ class MonodepthOptions:
         self.parser.add_argument("--save_make3d",
                                  action="store_true")
 
+        # LOTUS-2 DISTILLATION options
+        self.parser.add_argument("--use_lotus2_distill",
+                                 help="if set, uses Lotus-2 teacher model for distillation",
+                                 action="store_true")
+        self.parser.add_argument("--lotus2_weights_path",
+                                 type=str,
+                                 help="path to pretrained Lotus-2 model weights")
+        self.parser.add_argument("--distill_loss_weight",
+                                 type=float,
+                                 help="weight for distillation loss",
+                                 default=0.5)
+        self.parser.add_argument("--distill_temperature",
+                                 type=float,
+                                 help="temperature for softening distillation targets",
+                                 default=4.0)
+
     def parse(self):
         self.options = self.parser.parse_args()
         return self.options
