@@ -109,6 +109,7 @@ class ConvBlock(nn.Module):
         super(ConvBlock, self).__init__()
 
         self.conv = Conv3x3(in_channels, out_channels)
+        # ELU activation: f(x) = x if x > 0 else alpha * (exp(x) - 1)
         self.nonlin = nn.ELU(inplace=True)
 
     def forward(self, x):
@@ -123,6 +124,7 @@ class ODBlock(nn.Module):
         super(ODBlock, self).__init__()
 
         self.conv = ODConv2d(in_channels, out_channels,3,padding=1)
+        # ELU activation: f(x) = x if x > 0 else alpha * (exp(x) - 1)
         self.nonlin = nn.ELU(inplace=True)
 
     def forward(self, x):
