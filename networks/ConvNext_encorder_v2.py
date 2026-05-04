@@ -31,17 +31,18 @@ class Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
+        # Input: [N, C, H, W] = [1, 3, 1024, 1024]
         input = x
-        x = self.dwconv(x)
-        x = x.permute(0, 2, 3, 1)  # (N, C, H, W) -> (N, H, W, C)
-        x = self.norm(x)
-        x = self.pwconv1(x)
-        x = self.act(x)
-        x = self.grn(x)
-        x = self.pwconv2(x)
-        x = x.permute(0, 3, 1, 2)  # (N, H, W, C) -> (N, C, H, W)
+        x = self.dwconv(x)  # [1, C, 1024, 1024], depthwise conv with kernel 7, padding 3
+        x = x.permute(0, 2, 3, 1)  # [1, 1024, 1024, C], (N, C, H, W) -> (N, H, W, C)
+        x = self.norm(x)  # [1, 1024, 1024, C], LayerNorm
+        x = self.pwconv1(x)  # [1, 1024, 1024, 4*C], pointwise linear: C -> 4*C
+        x = self.act(x)  # [1, 1024, 1024, 4*C], GELU activation
+        x = self.grn(x)  # [1, 1024, 1024, 4*C], Global Response Normalization
+        x = self.pwconv2(x)  # [1, 1024, 1024, C], pointwise linear: 4*C -> C
+        x = x.permute(0, 3, 1, 2)  # [1, C, 1024, 1024], (N, H, W, C) -> (N, C, H, W)
 
-        x = input + self.drop_path(x)
+        x = input + self.drop_path(x)  # [1, C, 1024, 1024], residual connection
         return x
 
 
@@ -116,19 +117,23 @@ class ConvNeXtV2(nn.Module):
         return x
 
     def forward(self, x):
-        # for i in range(4):
-        #     x = self.downsample_layers[i](x)
-        #     x = self.stages[i](x)
-        #     # print(x.shape)
-        #     self.features.append(x)
+        # Input: [N, C, H, W] = [1, 3, 1024, 1024]
+        # Stage 0: stem downsampling (kernel=4, stride=4)
         self.features = []
-        x = self.downsample_layers[0](x)
-        x = self.stages[0](x)
-        self.features.append(x)
-        self.features.append(self.layer(1,self.features[-1]))
-        self.features.append(self.layer(2, self.features[-1]))
-        self.features.append(self.layer(3, self.features[-1]))
-        return self.features # global average pooling, (N, C, H, W) -> (N, C)
+        x = self.downsample_layers[0](x)  # [1, dims[0], 256, 256], e.g., [1, 128, 256, 256] for base model
+        x = self.stages[0](x)  # [1, dims[0], 256, 256], after Block processing
+        self.features.append(x)  # features[0]: [1, 128, 256, 256]
+        
+        # Stage 1: downsampling (stride=2)
+        self.features.append(self.layer(1, self.features[-1]))  # [1, dims[1], 128, 128], e.g., [1, 256, 128, 128]
+        
+        # Stage 2: downsampling (stride=2)
+        self.features.append(self.layer(2, self.features[-1]))  # [1, dims[2], 64, 64], e.g., [1, 512, 64, 64]
+        
+        # Stage 3: downsampling (stride=2)
+        self.features.append(self.layer(3, self.features[-1]))  # [1, dims[3], 32, 32], e.g., [1, 1024, 32, 32]
+        
+        return self.features  # List of 4 feature maps at different scales
 
 
 
