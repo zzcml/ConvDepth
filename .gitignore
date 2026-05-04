@@ -1,1 +1,52 @@
-Nothing should be ignored based on the provided file changes. The modification of 'layers.py' represents a source code file change, which should be tracked by Git. No build artifacts, dependencies, temporary files, or other ignorable items were detected in the changes.
+# Compiled Python files
+*.pyc
+__pycache__/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build/distribution artifacts
+dist/
+build/
+*.egg-info/
+.coverage
+coverage/
+htmlcov/
+
+# Python cache
+.Python
+*.pyc
+*.pyo
+*.pyd
+*$py.class
+*$pyc.class
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+
+# OS generated files
+.DS_Store
+Thumbs.db
