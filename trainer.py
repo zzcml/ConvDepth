@@ -197,6 +197,7 @@ class Trainer:
         # Initialize Lotus-2 teacher model for distillation
         self.teacher_model = None
         if self.opt.use_lotus2_distill:
+            from networks.lotus2_teacher import create_teacher_model
             assert self.opt.lotus2_weights_path is not None, \
                 "Please provide --lotus2_weights_path when using --use_lotus2_distill"
             self._init_lotus2_teacher()
@@ -221,50 +222,22 @@ class Trainer:
         """
         print("Loading Lotus-2 teacher model from:\n  ", self.opt.lotus2_weights_path)
         
-        # Import teacher model architecture (assuming similar structure)
-        # Lotus-2 typically uses a depth estimation network
+        # Import teacher model wrapper
+        from networks.lotus2_teacher import create_teacher_model
         from networks.ConvNext_encorder_v2 import convnextv2_base
         from networks.Convnext_decoder import ConvDecoder
         
-        # Create teacher model with same architecture
-        teacher_encoder = convnextv2_base()
-        teacher_depth = ConvDecoder(teacher_encoder.num_ch_enc, self.opt.scales)
+        # Create teacher model using factory function
+        self.teacher_model = create_teacher_model(
+            self.opt, 
+            encoder_class=convnextv2_base,
+            decoder_class=ConvDecoder
+        )
         
-        # Load pretrained weights
-        if os.path.isfile(self.opt.lotus2_weights_path):
-            checkpoint = torch.load(self.opt.lotus2_weights_path, map_location='cpu')
-            
-            # Handle different checkpoint formats
-            if 'encoder' in checkpoint and 'depth' in checkpoint:
-                teacher_encoder.load_state_dict(checkpoint['encoder'])
-                teacher_depth.load_state_dict(checkpoint['depth'])
-            else:
-                # Try loading directly
-                try:
-                    teacher_encoder.load_state_dict({k.replace('encoder.', ''): v 
-                                                    for k, v in checkpoint.items() 
-                                                    if 'encoder.' in k})
-                    teacher_depth.load_state_dict({k.replace('depth.', ''): v 
-                                                  for k, v in checkpoint.items() 
-                                                  if 'depth.' in k})
-                except:
-                    teacher_encoder.load_state_dict(checkpoint)
+        if self.teacher_model is not None:
+            print("Lotus-2 teacher model loaded successfully")
         else:
-            raise FileNotFoundError(f"Teacher weights not found at {self.opt.lotus2_weights_path}")
-        
-        # Move to device and set to eval mode
-        self.teacher_model = {
-            'encoder': teacher_encoder.to(self.device),
-            'depth': teacher_depth.to(self.device)
-        }
-        
-        # Freeze teacher parameters (no gradient computation)
-        for param in self.teacher_model['encoder'].parameters():
-            param.requires_grad = False
-        for param in self.teacher_model['depth'].parameters():
-            param.requires_grad = False
-            
-        print("Lotus-2 teacher model loaded successfully")
+            print("Warning: Teacher model initialization failed")
 
     def train(self):
         """Run the entire training pipeline
@@ -341,8 +314,7 @@ class Trainer:
         # Generate teacher predictions for distillation if enabled
         if self.teacher_model is not None:
             with torch.no_grad():
-                teacher_features = self.teacher_model['encoder'](inputs["color_aug", 0, 0])
-                teacher_outputs = self.teacher_model['depth'](teacher_features)
+                teacher_outputs = self.teacher_model(inputs["color_aug", 0, 0])
                 # Store teacher's disparity predictions for each scale
                 for scale in self.opt.scales:
                     outputs[("teacher_disp", scale)] = teacher_outputs[("disp", scale)].detach()
